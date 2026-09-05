@@ -1,17 +1,3 @@
-"""
-Minimal SQLite persistence for the checkers game.
-
-Uses the standard library sqlite3 module, so there's nothing extra to
-install. Tables:
-
-- users: username + password hash, for login.
-- game_state: a single row holding the current game as JSON (reusing
-  GameState.toDict()/loadFromDict(), which already existed for your
-  file-based save/load).
-- moves: an append-only log of every move applied, tagged with who made
-  it, for a simple history view.
-"""
-
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -36,9 +22,16 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
+    existing_cols = [
+        row["name"] for row in conn.execute("PRAGMA table_info(game_state)").fetchall()
+    ]
+    if existing_cols and "username" not in existing_cols:
+        conn.execute("DROP TABLE game_state")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS game_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
+            username TEXT PRIMARY KEY,
             state_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -53,12 +46,6 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-    # If moves already exists from before auth was added, add the new
-    # column rather than requiring you to delete the database.
-    try:
-        conn.execute("ALTER TABLE moves ADD COLUMN username TEXT")
-    except sqlite3.OperationalError:
-        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -80,27 +67,28 @@ def get_user(username):
     return dict(row) if row else None
 
 
-def load_game_state():
-    """Return the saved state dict, or None if there isn't one yet."""
+def load_game_state(username):
+    """Return that account's saved state dict, or None if it doesn't have one yet."""
     conn = get_connection()
-    row = conn.execute("SELECT state_json FROM game_state WHERE id = 1").fetchone()
+    row = conn.execute(
+        "SELECT state_json FROM game_state WHERE username = ?", (username,)
+    ).fetchone()
     conn.close()
     if row is None:
         return None
     return json.loads(row["state_json"])
 
 
-def save_game_state(state_dict):
-    """Upsert the single shared game's state. id is pinned to 1 since
-    there's only ever one game running at a time."""
+def save_game_state(username, state_dict):
+    """Upsert this account's game state."""
     conn = get_connection()
     conn.execute("""
-        INSERT INTO game_state (id, state_json, updated_at)
-        VALUES (1, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
+        INSERT INTO game_state (username, state_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(username) DO UPDATE SET
             state_json = excluded.state_json,
             updated_at = excluded.updated_at
-    """, (json.dumps(state_dict), datetime.now(timezone.utc).isoformat()))
+    """, (username, json.dumps(state_dict), datetime.now(timezone.utc).isoformat()))
     conn.commit()
     conn.close()
 
@@ -121,11 +109,12 @@ def log_move(player, from_pos, to_pos, username=None):
     conn.close()
 
 
-def get_move_history(limit=50):
+def get_move_history(username, limit=50):
+    """This account's own move history only."""
     conn = get_connection()
     rows = conn.execute("""
         SELECT player, username, from_pos, to_pos, created_at
-        FROM moves ORDER BY id DESC LIMIT ?
-    """, (limit,)).fetchall()
+        FROM moves WHERE username = ? ORDER BY id DESC LIMIT ?
+    """, (username, limit)).fetchall()
     conn.close()
     return [dict(row) for row in rows]

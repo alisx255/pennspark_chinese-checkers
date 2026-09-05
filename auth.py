@@ -1,13 +1,4 @@
-"""
-Minimal username/password auth.
 
-- Passwords are hashed with PBKDF2 (hashlib, standard library, no extra
-  dependency) plus a random per-user salt. Never store plain passwords.
-- Sessions are random tokens kept in memory (a plain dict), mapped to a
-  username. This means everyone gets logged out on server restart, which
-  is a reasonable tradeoff for a project this size; move `sessions` into
-  the database (like game_state) if you want logins to survive restarts.
-"""
 
 import hashlib
 import secrets

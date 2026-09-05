@@ -1,7 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 import json
-from board import GameState  # your file, adjust the import name to match
+from board import GameState  
 import db
 import auth
 
@@ -16,26 +16,33 @@ def get_logged_in_user(request: Request):
     token = request.cookies.get(SESSION_COOKIE)
     return auth.get_username(token)
 
-# Resume a saved game if one exists (server restart), otherwise start fresh.
-saved_state = db.load_game_state()
-if saved_state is not None:
-    gs = GameState.loadFromDict(saved_state)
-else:
-    gs = GameState()
-    p0 = gs.registerPlayer()
-    p1 = gs.registerPlayer()
-    gs.chooseCorner(p0, 0)
-    gs.chooseCorner(p1, 3)
-    gs.startGame()
-    db.save_game_state(gs.toDict())
-
-# Single hotseat mode: one tab controls both players, so there's no
-# per-connection player assignment. board.py's applyMove already checks
-# whose turn it is and that you're moving your own piece.
-connections = []
+games = {}
 
 
-def board_state_message() -> str:
+connections = {}
+
+
+def get_or_create_game(username):
+    if username in games:
+        return games[username]
+
+    saved = db.load_game_state(username)
+    if saved is not None:
+        gs = GameState.loadFromDict(saved)
+    else:
+        gs = GameState()
+        p0 = gs.registerPlayer()
+        p1 = gs.registerPlayer()
+        gs.chooseCorner(p0, 0)
+        gs.chooseCorner(p1, 3)
+        gs.startGame()
+        db.save_game_state(username, gs.toDict())
+
+    games[username] = gs
+    return gs
+
+
+def board_state_message(gs) -> str:
     """Current board + whose turn it is, in the shape the frontend expects."""
     board = {f"{q},{r}": v for (q, r), v in gs.board.items()}
     return json.dumps({
@@ -45,8 +52,8 @@ def board_state_message() -> str:
     })
 
 
-async def broadcast(message: str):
-    for conn in list(connections):
+async def broadcast(username, message: str):
+    for conn in list(connections.get(username, [])):
         await conn.send_text(message)
 
 
@@ -90,15 +97,17 @@ async def logout(request: Request):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     # Reject before accept()ing if there's no valid session cookie, so an
-    # unauthenticated client never gets a live connection to the game.
+    # unauthenticated client never gets a live connection to any game.
     username = auth.get_username(websocket.cookies.get(SESSION_COOKIE))
     if username is None:
         await websocket.close(code=1008)  # 1008 = policy violation
         return
 
     await websocket.accept()
-    connections.append(websocket)
-    await websocket.send_text(board_state_message())
+    connections.setdefault(username, []).append(websocket)
+
+    gs = get_or_create_game(username)
+    await websocket.send_text(board_state_message(gs))
 
     try:
         while True:
@@ -141,9 +150,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 try:
                     gs.applyMove(move_from[0], move_from[1], move_to[0], move_to[1], move_player)
-                    db.save_game_state(gs.toDict())
+                    db.save_game_state(username, gs.toDict())
                     db.log_move(move_player, move_from, move_to, username=username)
-                    await broadcast(board_state_message())
+                    await broadcast(username, board_state_message(gs))
                 except ValueError as e:
                     await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
                 continue
@@ -151,21 +160,18 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(json.dumps({"type": "error", "message": f"Unknown message type: {msg_type}"}))
 
     except WebSocketDisconnect:
-        connections.remove(websocket)
+        if websocket in connections.get(username, []):
+            connections[username].remove(websocket)
 
 
 @app.get("/history")
-async def history():
-    """Recent moves pulled from the database. Useful for confirming
-    persistence is actually working, and covers 'API calls' + 'database
-    integration' together."""
-    return db.get_move_history()
+async def history(request: Request):
+    """This account's own recent moves, pulled from the database."""
+    username = get_logged_in_user(request)
+    if username is None:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+    return db.get_move_history(username)
 
-
-# Serve the frontend from the same app so you only need one deployment
-# target. An explicit route (instead of app.mount at "/") means there's no
-# ambiguity about it ever claiming the /ws path, regardless of where this
-# line sits in the file.
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     username = get_logged_in_user(request)
