@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Chinese Checkers</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #fafafa; }
+    #turnBanner {
+      display: inline-block;
+      padding: 8px 16px;
+      border-radius: 6px;
+      color: white;
+      font-weight: bold;
+      margin-bottom: 10px;
+      background: #999;
+      transition: background-color 0.3s ease;
+    }
+    #status { margin-bottom: 12px; min-height: 1.2em; color: #a33; }
+    #userBar { margin-bottom: 12px; font-size: 0.9em; color: #555; }
+    #userBar a { color: #3b6fd6; }
+    svg { width: 100%; max-width: 600px; height: auto; display: block; background: #fff; border: 1px solid #ccc; }
+    circle { transition: fill 0.15s ease, r 0.15s ease; }
+  </style>
+</head>
+<body>
+  <div id="userBar">Logged in as <strong>{{USERNAME}}</strong> &mdash; <a href="/logout">Log out</a></div>
+  <div id="turnBanner">Connecting...</div>
+  <div id="status"></div>
+  <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
+
+  <script>
+    const SIZE = 22;   // pixel spacing between adjacent pegs
+    const RADIUS = 9;  // peg circle radius
+    const PLAYER_COLORS = ["#d64545", "#3b6fd6"]; // player 0 (red), player 1 (blue)
+    const PLAYER_NAMES = ["Red", "Blue"];
+    const LEGAL_MOVE_COLOR = "#86efac";
+
+    let board = {};            // "q,r" -> -1 (empty) or player number
+    let currentPlayer = null;
+    let selected = null;       // "q,r" of the currently selected peg, or null
+    let legalMoves = new Set(); // "q,r" strings the selected piece can reach
+
+    const svg = document.getElementById("board");
+    const banner = document.getElementById("turnBanner");
+    const statusEl = document.getElementById("status");
+
+    const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
+
+    socket.onopen = () => { banner.textContent = "Connected, waiting for game state..."; };
+    socket.onclose = () => { banner.textContent = "Disconnected"; banner.style.backgroundColor = "#999"; };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === "update") {
+        board = data.board;
+        currentPlayer = data.currentPlayer;
+        selected = null;
+        legalMoves = new Set();
+        statusEl.textContent = "";
+        updateBanner();
+        render();
+      } else if (data.type === "legal_moves") {
+        const posKey = `${data.position[0]},${data.position[1]}`;
+        if (posKey === selected) {
+          legalMoves = new Set(data.moves.map(([q, r]) => `${q},${r}`));
+          render();
+        }
+      } else if (data.type === "error") {
+        statusEl.textContent = data.message;
+      }
+    };
+
+    function updateBanner() {
+      banner.textContent = `${PLAYER_NAMES[currentPlayer]}'s turn`;
+      banner.style.backgroundColor = PLAYER_COLORS[currentPlayer] ?? "#999";
+    }
+
+    // Standard axial-to-pixel conversion (pointy-top layout), matching the
+    // (q, r) system board.py uses. This is what produces the actual
+    // six-pointed star shape.
+    function hexToPixel(q, r) {
+      const x = SIZE * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r);
+      const y = SIZE * 1.5 * r;
+      return [x, y];
+    }
+
+    function render() {
+      const points = Object.entries(board).map(([key, value]) => {
+        const [q, r] = key.split(",").map(Number);
+        const [x, y] = hexToPixel(q, r);
+        return { key, q, r, x, y, value };
+      });
+
+      const xs = points.map((p) => p.x);
+      const ys = points.map((p) => p.y);
+      const minX = Math.min(...xs) - RADIUS * 2;
+      const maxX = Math.max(...xs) + RADIUS * 2;
+      const minY = Math.min(...ys) - RADIUS * 2;
+      const maxY = Math.max(...ys) + RADIUS * 2;
+      svg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
+
+      svg.innerHTML = "";
+      for (const p of points) {
+        const isLegalDest = legalMoves.has(p.key);
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circle.setAttribute("cx", p.x);
+        circle.setAttribute("cy", p.y);
+        circle.setAttribute("r", isLegalDest ? RADIUS - 2 : RADIUS);
+
+        let fill;
+        if (p.value === -1) {
+          fill = isLegalDest ? LEGAL_MOVE_COLOR : "#eee";
+        } else {
+          fill = PLAYER_COLORS[p.value] ?? "#999";
+        }
+        circle.setAttribute("fill", fill);
+        circle.setAttribute("stroke", p.key === selected ? "#000" : "#aaa");
+        circle.setAttribute("stroke-width", p.key === selected ? 3 : 1);
+        circle.style.cursor = "pointer";
+        circle.addEventListener("click", () => handleCellClick(p.key, p.q, p.r, p.value));
+        svg.appendChild(circle);
+      }
+    }
+
+    function selectPiece(key, q, r) {
+      selected = key;
+      legalMoves = new Set();
+      statusEl.textContent = "";
+      render();
+      socket.send(JSON.stringify({ type: "legal_moves", position: [q, r] }));
+    }
+
+    function handleCellClick(key, q, r, value) {
+      if (!selected) {
+        if (value !== currentPlayer) {
+          statusEl.textContent = value === -1
+            ? `Select one of ${PLAYER_NAMES[currentPlayer]}'s pieces first.`
+            : `That's not ${PLAYER_NAMES[currentPlayer]}'s piece.`;
+          return;
+        }
+        selectPiece(key, q, r);
+        return;
+      }
+
+      if (selected === key) {
+        selected = null;
+        legalMoves = new Set();
+        render();
+        return;
+      }
+
+      // Clicking another of your own pieces re-selects instead of
+      // attempting an illegal move.
+      if (value === currentPlayer) {
+        selectPiece(key, q, r);
+        return;
+      }
+
+      if (!legalMoves.has(key)) {
+        statusEl.textContent = "Not a legal destination for that piece.";
+        return;
+      }
+
+      const [fromQ, fromR] = selected.split(",").map(Number);
+      socket.send(JSON.stringify({
+        type: "move",
+        from: [fromQ, fromR],
+        to: [q, r],
+        player: currentPlayer,
+      }));
+      selected = null;
+      legalMoves = new Set();
+    }
+  </script>
+</body>
+</html>

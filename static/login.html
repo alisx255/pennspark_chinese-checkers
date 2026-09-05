@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Log in - Chinese Checkers</title>
+  <style>
+    body { font-family: sans-serif; padding: 40px; background: #fafafa; display: flex; justify-content: center; }
+    form { background: white; padding: 24px; border-radius: 8px; border: 1px solid #ddd; width: 280px; }
+    label { display: block; margin-top: 12px; font-size: 0.9em; color: #555; }
+    input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+    button { width: 100%; margin-top: 20px; padding: 10px; background: #3b6fd6; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    .error { color: #a33; margin-top: 12px; min-height: 1.2em; }
+    .link { margin-top: 16px; font-size: 0.9em; text-align: center; }
+  </style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <h2>Log in</h2>
+    <label>Username</label>
+    <input type="text" name="username" required autofocus />
+    <label>Password</label>
+    <input type="password" name="password" required />
+    <button type="submit">Log in</button>
+    <div class="error" id="errorMsg"></div>
+    <div class="link">No account? <a href="/register">Register</a></div>
+  </form>
+  <script>
+    if (new URLSearchParams(location.search).get("error")) {
+      document.getElementById("errorMsg").textContent = "Invalid username or password.";
+    }
+  </script>
+</body>
+</html>
